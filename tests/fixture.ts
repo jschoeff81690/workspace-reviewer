@@ -62,6 +62,21 @@ export interface Fixture {
   /** `alpha` has every interesting state; `beta` is clean with two commits. */
   alpha: string
   beta: string
+  /**
+   * `gamma` is a branch of three commits whose base has since moved on, so the
+   * aggregate diff has to come from the merge base rather than the base tip.
+   */
+  gamma: string
+  gammaCommits: GammaCommits
+}
+
+export interface GammaCommits {
+  /** The merge base: where `feature` left `main`. */
+  mergeBase: string
+  /** The three commits on the branch, oldest first. */
+  feature: string[]
+  /** A commit added to the base after the branch diverged. */
+  baseAhead: string
 }
 
 function git(cwd: string, args: string[]): void {
@@ -114,7 +129,65 @@ export function makeFixture(): Fixture {
   writeFileSync(path.join(beta, 'style.css'), 'body { color: rebeccapurple; }\n.title { font-weight: 600; }\n')
   git(beta, ['commit', '-qam', 'Restyle the title'])
 
-  return { root, alpha, beta }
+  const gamma = path.join(root, 'gamma')
+  const gammaCommits = buildGamma(gamma)
+
+  return { root, alpha, beta, gamma, gammaCommits }
+}
+
+function revParse(dir: string): string {
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim()
+}
+
+/**
+ * A branch with its own stack of commits, on top of a base that has since
+ * gained a commit of its own.
+ *
+ *   main:    A -- B -- D            (origin/main points at D)
+ *                  \
+ *   feature:         C1 -- C2 -- C3
+ *
+ * So `feature` is 3 ahead and 1 behind, and the merge base is B.
+ */
+function buildGamma(dir: string): GammaCommits {
+  init(dir)
+  writeFileSync(path.join(dir, 'base.txt'), 'first\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-qm', 'A: first base commit'])
+  writeFileSync(path.join(dir, 'base.txt'), 'first\nsecond\n')
+  git(dir, ['commit', '-qam', 'B: second base commit'])
+  const mergeBase = revParse(dir)
+
+  // A commit on the base after the branch point; it must not leak into the
+  // branch's aggregate diff.
+  writeFileSync(path.join(dir, 'base-only.txt'), 'added on main after the branch point\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-qm', 'D: base moves on'])
+  const baseAhead = revParse(dir)
+
+  // Stand in for a remote: origin/main tracks the base, and origin/HEAD names it.
+  git(dir, ['update-ref', 'refs/remotes/origin/main', baseAhead])
+  git(dir, ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+
+  git(dir, ['checkout', '-q', '-b', 'feature', mergeBase])
+  const feature: string[] = []
+
+  writeFileSync(path.join(dir, 'service.py'), 'def handle():\n    return 1\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-qm', 'C1: add the handler'])
+  feature.push(revParse(dir))
+
+  writeFileSync(path.join(dir, 'service.py'), 'def handle(request):\n    return len(request)\n')
+  writeFileSync(path.join(dir, 'helper.py'), 'def helper():\n    return "help"\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-qm', 'C2: take a request and add a helper'])
+  feature.push(revParse(dir))
+
+  writeFileSync(path.join(dir, 'helper.py'), 'def helper(name):\n    return f"help {name}"\n')
+  git(dir, ['commit', '-qam', 'C3: parameterize the helper'])
+  feature.push(revParse(dir))
+
+  return { mergeBase, feature, baseAhead }
 }
 
 export function removeFixture(fixture: Fixture): void {

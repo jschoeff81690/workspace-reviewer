@@ -91,3 +91,23 @@ export async function toplevel(dir: string): Promise<string | null> {
   const out = res.stdout.trim()
   return out || null
 }
+
+/**
+ * Refs arrive from the URL and are interpolated into git arguments, so they are
+ * restricted to the characters real ref names use. Anything with a leading dash
+ * (option injection) or a range operator is refused.
+ */
+const SAFE_REF = /^[A-Za-z0-9._/~^{}@+-]{1,255}$/
+
+export function isSafeRef(ref: string): boolean {
+  if (!SAFE_REF.test(ref)) return false
+  if (ref.startsWith('-')) return false
+  if (ref.includes('..')) return false
+  return true
+}
+
+/** Validate a caller-supplied ref and resolve it to a commit sha. */
+export async function resolveCommitish(cwd: string, ref: string): Promise<string | null> {
+  if (!isSafeRef(ref)) return null
+  return await revParse(cwd, `${ref}^{commit}`)
+}

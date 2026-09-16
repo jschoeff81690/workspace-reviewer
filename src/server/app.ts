@@ -1,9 +1,20 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { CompareMode, RepoSummary, WorkspaceInfo } from '../shared/types.ts'
+import type {
+  BaseInfo,
+  CompareMode,
+  Comparison,
+  RepoSummary,
+  WorkspaceInfo,
+} from '../shared/types.ts'
 import { COMPARE_MODES } from '../shared/types.ts'
+import { resolveBase } from './base.ts'
 import { listChanges } from './changes.ts'
 import { mapLimit } from './concurrency.ts'
 import { getFileDiff } from './filediff.ts'
+import { isSafeRef } from './git.ts'
+import { listCommits } from './log.ts'
+import { ComparisonError } from './modes.ts'
+import { readStatus } from './status.ts'
 import { openSse, sendError, sendJson, serveStatic, type SseClient } from './http.ts'
 import type { RepoStateStore } from './state.ts'
 import type { WorkspaceWatcher } from './watcher.ts'
@@ -18,10 +29,15 @@ export interface AppContext {
   serverId: string
   clientDir: string | null
   pollMs: number
+  /** `--base` override applied to every repo. */
+  baseOverride?: string
 }
 
 /** Coalesce bursts of workspace requests (the UI refetches several at once). */
 const SUMMARY_TTL_MS = 200
+/** Default length of the per-repo commit list. */
+const COMMIT_LIMIT = 30
+const COMMIT_LIMIT_MAX = 500
 /** Simultaneous git invocations while summarizing the workspace. */
 const SUMMARY_CONCURRENCY = 6
 
@@ -37,7 +53,10 @@ export function createApp(ctx: AppContext) {
     // Capped so a long poll interval cannot serve stale counts to a new tab.
     const maxAge = Math.min(Math.max(ctx.pollMs * 2, 1_000), 3_000)
     const value = mapLimit(ctx.repos, SUMMARY_CONCURRENCY, (repo) =>
-      summarizeRepo(repo, ctx.store?.get(repo.name, maxAge) ?? undefined),
+      summarizeRepo(repo, {
+        status: ctx.store?.get(repo.name, maxAge) ?? undefined,
+        baseOverride: ctx.baseOverride,
+      }),
     )
     summaryCache = { at: now, value }
     return value
@@ -47,6 +66,20 @@ export function createApp(ctx: AppContext) {
     summaryCache = null
     for (const client of clients) client.send('change', { repos })
   })
+
+  /** The repo's base branch, from the watcher's status when it is fresh. */
+  const baseFor = async (repo: RepoHandle): Promise<BaseInfo | null> => {
+    const cached = ctx.store?.get(repo.name, Math.max(ctx.pollMs * 2, 1_000))
+    const status = cached ?? (await readStatus(repo.path).catch(() => null))
+    if (!status) return null
+    return await resolveBase({
+      repoPath: repo.path,
+      headSha: status.branch.oid,
+      branch: status.branch.branch,
+      upstream: status.branch.upstream,
+      override: ctx.baseOverride,
+    })
+  }
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -99,45 +132,72 @@ export function createApp(ctx: AppContext) {
       return
     }
 
-    const match = /^\/api\/repos\/([^/]+)\/(changes|file)$/.exec(pathname)
+    const match = /^\/api\/repos\/([^/]+)\/(changes|file|commits)$/.exec(pathname)
     if (match) {
       const repo = repoByName.get(decodeURIComponent(match[1]))
       if (!repo) {
         sendError(res, 404, `unknown repo: ${decodeURIComponent(match[1])}`)
         return
       }
-      const mode = parseMode(url.searchParams.get('mode'))
-      if (!mode) {
-        sendError(res, 400, `mode must be one of ${COMPARE_MODES.join(', ')}`)
+
+      if (match[2] === 'commits') {
+        const limit = Math.min(
+          Math.max(Number(url.searchParams.get('limit')) || COMMIT_LIMIT, 1),
+          COMMIT_LIMIT_MAX,
+        )
+        sendJson(res, 200, {
+          ...(await listCommits({
+            repoName: repo.name,
+            repoPath: repo.path,
+            base: await baseFor(repo),
+            limit,
+          })),
+        })
         return
       }
 
-      if (match[2] === 'changes') {
-        sendJson(res, 200, await listChanges(repo.name, repo.path, mode))
+      const comparison = parseComparison(url.searchParams)
+      if (!comparison) {
+        sendError(res, 400, `mode must be one of ${COMPARE_MODES.join(', ')}, with a valid ref`)
         return
       }
+      const base = await baseFor(repo)
 
-      const filePath = url.searchParams.get('path')
-      if (!filePath || !isSafeRelativePath(filePath)) {
-        sendError(res, 400, 'path is required and must be relative to the repo root')
-        return
+      try {
+        if (match[2] === 'changes') {
+          sendJson(res, 200, await listChanges(repo.name, repo.path, comparison, base))
+          return
+        }
+
+        const filePath = url.searchParams.get('path')
+        if (!filePath || !isSafeRelativePath(filePath)) {
+          sendError(res, 400, 'path is required and must be relative to the repo root')
+          return
+        }
+        const oldPath = url.searchParams.get('oldPath')
+        if (oldPath && !isSafeRelativePath(oldPath)) {
+          sendError(res, 400, 'oldPath must be relative to the repo root')
+          return
+        }
+        sendJson(
+          res,
+          200,
+          await getFileDiff({
+            repoName: repo.name,
+            repoPath: repo.path,
+            comparison,
+            base,
+            filePath,
+            oldPath: oldPath ?? undefined,
+          }),
+        )
+      } catch (err) {
+        if (err instanceof ComparisonError) {
+          sendError(res, err.status, err.message)
+          return
+        }
+        throw err
       }
-      const oldPath = url.searchParams.get('oldPath')
-      if (oldPath && !isSafeRelativePath(oldPath)) {
-        sendError(res, 400, 'oldPath must be relative to the repo root')
-        return
-      }
-      sendJson(
-        res,
-        200,
-        await getFileDiff({
-          repoName: repo.name,
-          repoPath: repo.path,
-          mode,
-          filePath,
-          oldPath: oldPath ?? undefined,
-        }),
-      )
       return
     }
 
@@ -167,6 +227,22 @@ export function createApp(ctx: AppContext) {
 function parseMode(raw: string | null): CompareMode | null {
   if (!raw) return 'worktree'
   return (COMPARE_MODES as string[]).includes(raw) ? (raw as CompareMode) : null
+}
+
+/** `?mode=commit&ref=<sha>` / `?mode=branch&base=origin/main`. */
+function parseComparison(params: URLSearchParams): Comparison | null {
+  const mode = parseMode(params.get('mode'))
+  if (!mode) return null
+  const ref = params.get('ref')
+  const base = params.get('base')
+  if (ref !== null && !isSafeRef(ref)) return null
+  if (base !== null && !isSafeRef(base)) return null
+  if (mode === 'commit' && !ref) return null
+  return {
+    mode,
+    ...(ref ? { ref } : {}),
+    ...(base ? { base } : {}),
+  }
 }
 
 /** Paths come from git output, but they arrive via the URL; re-check them. */

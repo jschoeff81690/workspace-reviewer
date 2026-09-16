@@ -26,6 +26,8 @@ Usage
 Options
   -p, --port <n>     Port to listen on (default ${DEFAULT_PORT}, tries the next free one)
   -d, --depth <n>    How deep to search for repos below the directory (default 1)
+  -b, --base <ref>   Base branch for the "Branch" comparison (default: the
+                     branch's upstream, else origin/HEAD, else main/master)
       --poll <ms>    Change-poll interval in ms (default 4000, or 1500 with --no-watch)
       --host <addr>  Interface to bind (default 127.0.0.1)
       --no-open      Do not open a browser
@@ -43,6 +45,7 @@ interface Options {
   port: number
   host: string
   depth: number
+  base?: string
   pollMs: number
   open: boolean
   watchFs: boolean
@@ -56,6 +59,7 @@ function parseOptions(argv: string[]): Options | { help: true } | { version: tru
     options: {
       port: { type: 'string', short: 'p' },
       depth: { type: 'string', short: 'd' },
+      base: { type: 'string', short: 'b' },
       poll: { type: 'string' },
       host: { type: 'string' },
       'no-open': { type: 'boolean' },
@@ -75,6 +79,7 @@ function parseOptions(argv: string[]): Options | { help: true } | { version: tru
     port: numberOr(values.port, DEFAULT_PORT),
     host: values.host ?? '127.0.0.1',
     depth: numberOr(values.depth, 1),
+    ...(values.base ? { base: values.base } : {}),
     pollMs: Math.max(250, numberOr(values.poll, watchFs ? DEFAULT_POLL_WATCHING : DEFAULT_POLL_BARE)),
     open: !values['no-open'],
     watchFs,
@@ -195,6 +200,7 @@ export async function run(argv = process.argv.slice(2)): Promise<void> {
     serverId: randomUUID(),
     clientDir,
     pollMs: options.pollMs,
+    ...(options.base ? { baseOverride: options.base } : {}),
   })
 
   const server = await listen(app.handler, options.host, options.port)
@@ -233,7 +239,12 @@ async function printBanner(
   clientDir: string | null,
   store: RepoStateStore,
 ): Promise<void> {
-  const summaries = await mapLimit(repos, 6, (repo) => summarizeRepo(repo, store.get(repo.name, 5_000) ?? undefined))
+  const summaries = await mapLimit(repos, 6, (repo) =>
+    summarizeRepo(repo, {
+      status: store.get(repo.name, 5_000) ?? undefined,
+      ...(options.base ? { baseOverride: options.base } : {}),
+    }),
+  )
   const width = Math.max(...summaries.map((r) => r.name.length))
   const lines = summaries.map((repo) => {
     const counts = repo.counts
@@ -248,9 +259,11 @@ async function printBanner(
           ]
             .filter(Boolean)
             .join(', ')
-        : `clean · ${repo.head?.shortSha ?? 'no commits'} ${repo.head?.subject ?? ''}`.slice(0, 60)
+        : `clean · ${repo.head?.shortSha ?? 'no commits'} ${repo.head?.subject ?? ''}`.slice(0, 44)
     const marker = repo.error ? '!' : repo.dirty ? '●' : '○'
-    return `  ${marker} ${repo.name.padEnd(width)}  ${repo.branch ?? 'detached'}  ${state}`
+    const ahead =
+      repo.base && repo.base.ahead > 0 ? `  [${repo.base.ahead} ahead of ${repo.base.ref}]` : ''
+    return `  ${marker} ${repo.name.padEnd(width)}  ${repo.branch ?? 'detached'}  ${state}${ahead}`
   })
 
   const dirtyCount = summaries.filter((r) => r.dirty).length

@@ -1,8 +1,15 @@
 import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
-import type { ChangedFile, CompareMode, FileStatus, RepoChanges } from '../shared/types.ts'
+import type {
+  BaseInfo,
+  ChangedFile,
+  Comparison,
+  FileStatus,
+  RepoChanges,
+} from '../shared/types.ts'
 import { compareNames } from '../shared/sort.ts'
 import { git, splitZ } from './git.ts'
+import { listRange } from './log.ts'
 import { resolveMode } from './modes.ts'
 import { isConflict, readStatus, type RepoStatus, type StatusEntry } from './status.ts'
 
@@ -86,15 +93,20 @@ export function statusFromCode(code: string | undefined): FileStatus {
   }
 }
 
+/** Commits listed alongside a branch-mode diff. */
+const RANGE_COMMIT_LIMIT = 100
+
 export async function listChanges(
   repoName: string,
   repoPath: string,
-  mode: CompareMode,
+  comparison: Comparison,
+  base: BaseInfo | null,
 ): Promise<RepoChanges> {
-  const spec = await resolveMode(repoPath, mode)
+  const spec = await resolveMode({ repoPath, comparison, base })
+  const mode = spec.comparison.mode
   // Commit-to-commit comparisons have no index or work tree to consult, so
   // skip the status call entirely there.
-  const needsStatus = spec.mode !== 'lastCommit'
+  const needsStatus = mode === 'worktree' || mode === 'staged' || mode === 'unstaged'
   const [numstatRes, nameStatusRes, status] = await Promise.all([
     git(repoPath, [...spec.diffArgs, '--numstat', '-z', '--']),
     git(repoPath, [...spec.diffArgs, '--name-status', '-z', '--']),
@@ -127,25 +139,33 @@ export async function listChanges(
   files.sort((a, b) => compareNames(a.path, b.path))
   const truncated = files.length > FILE_LIMIT
 
+  // Branch mode folds several commits into one diff; list them so the UI can
+  // show what went into it.
+  const commits =
+    spec.range && spec.range.ahead > 0
+      ? await listRange(repoPath, spec.range.fromSha, spec.range.toSha, RANGE_COMMIT_LIMIT)
+      : []
+
   return {
     repo: repoName,
-    mode: spec.mode,
+    comparison: spec.comparison,
     label: spec.label,
     files: truncated ? files.slice(0, FILE_LIMIT) : files,
     commit: spec.commit,
+    commits,
     truncated,
   }
 }
 
-function stagedFlag(mode: CompareMode, entry: StatusEntry | undefined): boolean {
+function stagedFlag(mode: Comparison['mode'], entry: StatusEntry | undefined): boolean {
   if (mode === 'staged') return true
-  if (mode === 'lastCommit' || mode === 'unstaged') return false
+  if (mode !== 'worktree') return false
   return !!entry && entry.x !== ' ' && entry.x !== '?'
 }
 
-function unstagedFlag(mode: CompareMode, entry: StatusEntry | undefined): boolean {
+function unstagedFlag(mode: Comparison['mode'], entry: StatusEntry | undefined): boolean {
   if (mode === 'unstaged') return true
-  if (mode === 'lastCommit' || mode === 'staged') return false
+  if (mode !== 'worktree') return false
   return !!entry && entry.y !== ' ' && entry.y !== '?'
 }
 

@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ChangedFile,
-  CompareMode,
+  Comparison,
   FileDiff,
   RepoChanges,
+  RepoCommits,
   RepoSummary,
   WorkspaceInfo,
 } from '../shared/types.ts'
+import { comparisonKey, sameComparison } from '../shared/types.ts'
 import { DiffPane } from './components/DiffPane.tsx'
 import { Sidebar } from './components/Sidebar.tsx'
-import { api } from './lib/api.ts'
+import { ApiError, api } from './lib/api.ts'
 import { warmHighlighter, type ThemeName } from './lib/highlight.ts'
 import { useLive } from './lib/live.ts'
 import { flattenFiles, buildTree } from './lib/tree.ts'
 import { usePersisted } from './lib/usePersisted.ts'
 import type { Selection, ViewMode } from './lib/uiTypes.ts'
 
-const changesKey = (repo: string, mode: CompareMode): string => `${repo}|${mode}`
+/** How many commits the history list asks for, and how much "show older" adds. */
+const COMMIT_PAGE = 30
 
 export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null)
@@ -29,8 +32,11 @@ export function App() {
   const [filter, setFilter] = useState('')
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set())
   const [pendingSelect, setPendingSelect] = useState<string | null>(null)
+  const [commits, setCommits] = useState<Record<string, RepoCommits | undefined>>({})
+  const [commitLimits, setCommitLimits] = useState<Record<string, number>>({})
+  const [commitsCollapsed, setCommitsCollapsed] = useState<Set<string>>(new Set())
 
-  const [modeOverrides, setModeOverrides] = usePersisted<Record<string, CompareMode>>('modes', {})
+  const [comparisons, setComparisons] = usePersisted<Record<string, Comparison>>('comparisons', {})
   const [expandedList, setExpandedList] = usePersisted<string[]>('expanded', [])
   const [selection, setSelection] = usePersisted<Selection | null>('selection', null)
   const [view, setView] = usePersisted<ViewMode>('view', 'inline')
@@ -66,13 +72,15 @@ export function App() {
     void loadWorkspace()
   }, [loadWorkspace])
 
-  const modeFor = useCallback(
-    (repo: RepoSummary): CompareMode => {
-      const override = modeOverrides[repo.name]
-      if (override && repo.availableModes.includes(override)) return override
-      return repo.defaultMode
+  const comparisonFor = useCallback(
+    (repo: RepoSummary): Comparison => {
+      const stored = comparisons[repo.name]
+      // A stored mode can stop applying (nothing staged any more, no commits
+      // ahead); fall back to whatever the repo opens with.
+      if (stored && repo.availableModes.includes(stored.mode)) return stored
+      return { mode: repo.defaultMode }
     },
-    [modeOverrides],
+    [comparisons],
   )
 
   const repos = useMemo(() => {
@@ -91,21 +99,49 @@ export function App() {
 
   /* -------------------------------------------------------------- changes */
   const loadChanges = useCallback(
-    async (repoName: string, mode: CompareMode, force = false): Promise<RepoChanges | null> => {
-      const key = changesKey(repoName, mode)
+    async (repoName: string, comparison: Comparison, force = false): Promise<RepoChanges | null> => {
+      const key = comparisonKey(repoName, comparison)
       if (!force && inFlight.current.has(key)) return null
       inFlight.current.add(key)
       try {
-        const next = await api.changes(repoName, mode)
+        const next = await api.changes(repoName, comparison)
         setChanges((prev) => ({ ...prev, [key]: next }))
         setChangesError((prev) => ({ ...prev, [key]: undefined }))
         return next
       } catch (err) {
+        // A remembered commit can vanish (rebase, amend): drop back to the
+        // repo's default rather than leaving the pane stuck on an error.
+        if (err instanceof ApiError && err.status === 404 && comparison.mode === 'commit') {
+          setComparisons((prev) => {
+            const next = { ...prev }
+            delete next[repoName]
+            return next
+          })
+          return null
+        }
         setChangesError((prev) => ({
           ...prev,
           [key]: err instanceof Error ? err.message : String(err),
         }))
         return null
+      } finally {
+        inFlight.current.delete(key)
+      }
+    },
+    [setComparisons],
+  )
+
+  const loadCommits = useCallback(
+    async (repoName: string, limit: number): Promise<void> => {
+      const key = `commits:${repoName}:${limit}`
+      if (inFlight.current.has(key)) return
+      inFlight.current.add(key)
+      try {
+        const next = await api.commits(repoName, limit)
+        setCommits((prev) => ({ ...prev, [repoName]: next }))
+      } catch {
+        // The commit list is supporting information; a failure just leaves it
+        // empty rather than blocking the diff.
       } finally {
         inFlight.current.delete(key)
       }
@@ -117,19 +153,29 @@ export function App() {
   useEffect(() => {
     for (const repo of workspace?.repos ?? []) {
       if (!expanded.has(repo.name)) continue
-      const mode = modeFor(repo)
-      const key = changesKey(repo.name, mode)
+      const comparison = comparisonFor(repo)
+      const key = comparisonKey(repo.name, comparison)
       if (changes[key] || changesError[key] || inFlight.current.has(key)) continue
-      void loadChanges(repo.name, mode)
+      void loadChanges(repo.name, comparison)
     }
-  }, [workspace, expanded, modeFor, changes, changesError, loadChanges])
+  }, [workspace, expanded, comparisonFor, changes, changesError, loadChanges])
+
+  // The commit list loads with the repo, so its stack of commits is visible
+  // without a second click.
+  useEffect(() => {
+    for (const repo of workspace?.repos ?? []) {
+      if (!expanded.has(repo.name) || !repo.head) continue
+      const limit = commitLimits[repo.name] ?? COMMIT_PAGE
+      if (commits[repo.name]?.commits.length === undefined) void loadCommits(repo.name, limit)
+    }
+  }, [workspace, expanded, commits, commitLimits, loadCommits])
 
   /* -------------------------------------------------- selection lifecycle */
   const visibleFiles = useMemo((): ChangedFile[] => {
     if (!selection) return []
     const repo = repoByName.get(selection.repo)
     if (!repo) return []
-    const current = changes[changesKey(repo.name, modeFor(repo))]
+    const current = changes[comparisonKey(repo.name, comparisonFor(repo))]
     if (!current) return []
     const needle = filter.trim().toLowerCase()
     const repoMatches = needle !== '' && repo.name.toLowerCase().includes(needle)
@@ -138,7 +184,7 @@ export function App() {
         ? current.files
         : current.files.filter((candidate) => candidate.path.toLowerCase().includes(needle))
     return flattenFiles(buildTree(files))
-  }, [selection, repoByName, changes, modeFor, filter])
+  }, [selection, repoByName, changes, comparisonFor, filter])
 
   // After expanding a repo, open its first file so the right pane fills in.
   useEffect(() => {
@@ -148,12 +194,20 @@ export function App() {
       setPendingSelect(null)
       return
     }
-    const current = changes[changesKey(repo.name, modeFor(repo))]
+    const current = changes[comparisonKey(repo.name, comparisonFor(repo))]
     if (!current) return
-    const first = flattenFiles(buildTree(current.files))[0]
     setPendingSelect(null)
-    if (first) setSelection({ repo: repo.name, path: first.path, oldPath: first.oldPath })
-  }, [pendingSelect, repoByName, changes, modeFor, setSelection])
+
+    // Stay on the same file when the new comparison also touches it, so
+    // stepping through commits keeps the file you are reading.
+    const ordered = flattenFiles(buildTree(current.files))
+    const kept =
+      selection?.repo === repo.name
+        ? ordered.find((file) => file.path === selection.path)
+        : undefined
+    const target = kept ?? ordered[0]
+    setSelection(target ? { repo: repo.name, path: target.path, oldPath: target.oldPath } : null)
+  }, [pendingSelect, repoByName, changes, comparisonFor, selection, setSelection])
 
   // First load with nothing remembered: open the first repo that has changes.
   const bootstrapped = useRef(false)
@@ -173,17 +227,23 @@ export function App() {
     if (!repoByName.has(selection.repo)) setSelection(null)
   }, [workspace, selection, repoByName, setSelection])
 
-  const selectionMode = useMemo((): CompareMode | null => {
+  const selectionComparison = useMemo((): Comparison | null => {
     if (!selection) return null
     const repo = repoByName.get(selection.repo)
-    return repo ? modeFor(repo) : null
-  }, [selection, repoByName, modeFor])
+    return repo ? comparisonFor(repo) : null
+  }, [selection, repoByName, comparisonFor])
+
+  /** The comparison's own description, for the diff pane header. */
+  const selectionChanges = useMemo((): RepoChanges | undefined => {
+    if (!selection || !selectionComparison) return undefined
+    return changes[comparisonKey(selection.repo, selectionComparison)]
+  }, [selection, selectionComparison, changes])
 
   const loadFile = useCallback(
-    async (target: Selection, mode: CompareMode, signal?: AbortSignal) => {
+    async (target: Selection, comparison: Comparison, signal?: AbortSignal) => {
       setFileLoading(true)
       try {
-        const next = await api.file(target.repo, mode, target.path, target.oldPath, signal)
+        const next = await api.file(target.repo, comparison, target.path, target.oldPath, signal)
         if (signal?.aborted) return
         setFile(next)
         setFileError(null)
@@ -199,15 +259,15 @@ export function App() {
   )
 
   useEffect(() => {
-    if (!selection || !selectionMode) {
+    if (!selection || !selectionComparison) {
       setFile(null)
       setFileError(null)
       return
     }
     const controller = new AbortController()
-    void loadFile(selection, selectionMode, controller.signal)
+    void loadFile(selection, selectionComparison, controller.signal)
     return () => controller.abort()
-  }, [selection, selectionMode, loadFile])
+  }, [selection, selectionComparison, loadFile])
 
   /* ----------------------------------------------------------------- live */
   const onServerChange = useCallback(
@@ -217,18 +277,39 @@ export function App() {
         for (const name of changedRepos) {
           const repo = current?.repos.find((candidate) => candidate.name === name)
           if (!repo) continue
-          // Reload every comparison we already hold for this repo.
-          for (const mode of repo.availableModes) {
-            if (changes[changesKey(name, mode)]) void loadChanges(name, mode, true)
+          const active = comparisonFor(repo)
+          // Reload the active comparison, plus any others already cached for
+          // this repo, so switching chips shows fresh data.
+          if (expanded.has(name)) {
+            void loadChanges(name, active, true)
+            // HEAD may have moved: a new commit, an amend, a branch switch.
+            void loadCommits(name, commitLimits[name] ?? COMMIT_PAGE)
           }
-          if (expanded.has(name)) void loadChanges(name, modeFor(repo), true)
+          for (const mode of repo.availableModes) {
+            const key = comparisonKey(name, { mode })
+            if (changes[key] && !sameComparison({ mode }, active)) {
+              void loadChanges(name, { mode }, true)
+            }
+          }
         }
       })
-      if (selection && selectionMode && changedRepos.includes(selection.repo)) {
-        void loadFile(selection, selectionMode)
+      if (selection && selectionComparison && changedRepos.includes(selection.repo)) {
+        void loadFile(selection, selectionComparison)
       }
     },
-    [loadWorkspace, workspace, changes, expanded, modeFor, loadChanges, selection, selectionMode, loadFile],
+    [
+      loadWorkspace,
+      workspace,
+      changes,
+      expanded,
+      comparisonFor,
+      loadChanges,
+      loadCommits,
+      commitLimits,
+      selection,
+      selectionComparison,
+      loadFile,
+    ],
   )
 
   const live = useLive(onServerChange)
@@ -237,10 +318,22 @@ export function App() {
     await api.refresh().catch(() => undefined)
     const next = await loadWorkspace()
     for (const repo of next?.repos ?? []) {
-      if (expanded.has(repo.name)) void loadChanges(repo.name, modeFor(repo), true)
+      if (!expanded.has(repo.name)) continue
+      void loadChanges(repo.name, comparisonFor(repo), true)
+      if (repo.head) void loadCommits(repo.name, commitLimits[repo.name] ?? COMMIT_PAGE)
     }
-    if (selection && selectionMode) void loadFile(selection, selectionMode)
-  }, [loadWorkspace, expanded, modeFor, loadChanges, selection, selectionMode, loadFile])
+    if (selection && selectionComparison) void loadFile(selection, selectionComparison)
+  }, [
+    loadWorkspace,
+    expanded,
+    comparisonFor,
+    loadChanges,
+    loadCommits,
+    commitLimits,
+    selection,
+    selectionComparison,
+    loadFile,
+  ])
 
   /* ------------------------------------------------------------- handlers */
   const toggleRepo = useCallback(
@@ -256,13 +349,32 @@ export function App() {
     [expanded, setExpandedList],
   )
 
-  const setMode = useCallback(
-    (repoName: string, mode: CompareMode) => {
-      setModeOverrides((prev) => ({ ...prev, [repoName]: mode }))
-      void loadChanges(repoName, mode, true)
+  const setComparison = useCallback(
+    (repoName: string, comparison: Comparison) => {
+      setComparisons((prev) => ({ ...prev, [repoName]: comparison }))
+      void loadChanges(repoName, comparison, true)
+      // Land on the first file of the new comparison.
       setPendingSelect(repoName)
     },
-    [setModeOverrides, loadChanges],
+    [setComparisons, loadChanges],
+  )
+
+  const toggleCommits = useCallback((repoName: string) => {
+    setCommitsCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(repoName)) next.delete(repoName)
+      else next.add(repoName)
+      return next
+    })
+  }, [])
+
+  const showMoreCommits = useCallback(
+    (repoName: string) => {
+      const next = (commitLimits[repoName] ?? COMMIT_PAGE) + COMMIT_PAGE
+      setCommitLimits((prev) => ({ ...prev, [repoName]: next }))
+      void loadCommits(repoName, next)
+    },
+    [commitLimits, loadCommits],
   )
 
   const selectFile = useCallback(
@@ -420,12 +532,16 @@ export function App() {
             collapsedDirs={collapsedDirs}
             selection={selection}
             filter={filter}
-            modeFor={modeFor}
+            comparisonFor={comparisonFor}
+            commits={commits}
+            commitsCollapsed={commitsCollapsed}
             onFilter={setFilter}
             onToggleRepo={toggleRepo}
-            onSetMode={setMode}
+            onSetComparison={setComparison}
             onSelect={selectFile}
             onToggleDir={toggleDir}
+            onToggleCommits={toggleCommits}
+            onShowMoreCommits={showMoreCommits}
             filterRef={filterRef}
           />
         )}
@@ -438,9 +554,14 @@ export function App() {
         />
 
         <DiffPane
-          key={selection ? `${selection.repo}|${selectionMode}|${selection.path}` : 'none'}
+          key={
+            selection && selectionComparison
+              ? `${comparisonKey(selection.repo, selectionComparison)}|${selection.path}`
+              : 'none'
+          }
           file={file}
-          mode={selectionMode ?? 'worktree'}
+          comparison={selectionComparison ?? { mode: 'worktree' }}
+          changes={selectionChanges}
           loading={fileLoading}
           error={fileError}
           view={view}

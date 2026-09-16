@@ -1,6 +1,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { CompareMode, RepoSummary } from '../shared/types.ts'
+import { resolveBase } from './base.ts'
 import { commitForSha } from './commits.ts'
 import { readStatus, type RepoStatus } from './status.ts'
 
@@ -58,12 +59,19 @@ async function isWorkTree(dir: string): Promise<boolean> {
   }
 }
 
-/**
- * Summarize a repo for the left pane. Pass `status` to reuse the watcher's
- * most recent poll instead of spawning another `git status`.
- */
-export async function summarizeRepo(repo: RepoHandle, status?: RepoStatus): Promise<RepoSummary> {
-  const base: RepoSummary = {
+export interface SummarizeOptions {
+  /** Reuse the watcher's most recent poll instead of spawning another git status. */
+  status?: RepoStatus
+  /** `--base` override from the command line. */
+  baseOverride?: string
+}
+
+/** Summarize a repo for the left pane: branch, divergence, counts and base. */
+export async function summarizeRepo(
+  repo: RepoHandle,
+  options: SummarizeOptions = {},
+): Promise<RepoSummary> {
+  const empty: RepoSummary = {
     name: repo.name,
     path: repo.path,
     branch: null,
@@ -76,34 +84,50 @@ export async function summarizeRepo(repo: RepoHandle, status?: RepoStatus): Prom
     dirty: false,
     defaultMode: 'lastCommit',
     availableModes: ['lastCommit'],
+    base: null,
   }
 
   try {
-    const current = status ?? (await readStatus(repo.path))
-    const head = await commitForSha(repo.path, current.branch.oid)
-    const { counts } = current
+    const status = options.status ?? (await readStatus(repo.path))
+    const [head, baseInfo] = await Promise.all([
+      commitForSha(repo.path, status.branch.oid),
+      resolveBase({
+        repoPath: repo.path,
+        headSha: status.branch.oid,
+        branch: status.branch.branch,
+        upstream: status.branch.upstream,
+        override: options.baseOverride,
+      }),
+    ])
+    const { counts } = status
     const dirty = counts.staged + counts.unstaged + counts.untracked + counts.conflicted > 0
 
     const availableModes: CompareMode[] = []
     if (dirty) availableModes.push('worktree')
     if (counts.staged > 0 || counts.conflicted > 0) availableModes.push('staged')
     if (counts.unstaged > 0 || counts.untracked > 0) availableModes.push('unstaged')
-    if (head) availableModes.push('lastCommit')
+    if (baseInfo && baseInfo.ahead > 0) availableModes.push('branch')
+    if (head) {
+      availableModes.push('lastCommit')
+      // Picked from the commit list rather than a chip, but still valid.
+      availableModes.push('commit')
+    }
 
     return {
-      ...base,
-      branch: current.branch.branch,
-      detached: current.branch.detached,
+      ...empty,
+      branch: status.branch.branch,
+      detached: status.branch.detached,
       head,
-      upstream: current.branch.upstream,
-      ahead: current.branch.ahead,
-      behind: current.branch.behind,
+      upstream: status.branch.upstream,
+      ahead: status.branch.ahead,
+      behind: status.branch.behind,
       counts,
       dirty,
+      base: baseInfo,
       defaultMode: dirty ? 'worktree' : 'lastCommit',
       availableModes: availableModes.length ? availableModes : ['lastCommit'],
     }
   } catch (err) {
-    return { ...base, error: err instanceof Error ? err.message : String(err) }
+    return { ...empty, error: err instanceof Error ? err.message : String(err) }
   }
 }

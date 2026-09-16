@@ -12,7 +12,7 @@ export async function run(fixture: Fixture): Promise<void> {
 
   const dirs = await discoverRepos({ root: fixture.root, depth: 1 })
   const repos = dirs.map((dir) => ({ name: path.basename(dir), path: dir }))
-  equal('discovers both repos', repos.map((r) => r.name).sort(), ['alpha', 'beta'])
+  equal('discovers every repo', repos.map((r) => r.name).sort(), ['alpha', 'beta', 'gamma'])
 
   const app = createApp({
     root: fixture.root,
@@ -39,10 +39,18 @@ export async function run(fixture: Fixture): Promise<void> {
     // git status reports `newdir/` as one untracked entry; the tree expands it
     // into its files, so the file list is longer than the untracked count.
     equal('alpha counts', alpha.counts, { staged: 2, unstaged: 3, untracked: 3, conflicted: 0 })
-    equal('alpha offers every mode', alpha.availableModes, ['worktree', 'staged', 'unstaged', 'lastCommit'])
+    equal('alpha offers every uncommitted mode', alpha.availableModes, [
+      'worktree',
+      'staged',
+      'unstaged',
+      'lastCommit',
+      'commit',
+    ])
+    check('alpha has no base branch (it is on main, with no remote)', alpha.base === null)
+    check('alpha cannot offer a branch diff without a base', !alpha.availableModes.includes('branch'))
     check('beta is clean', !beta.dirty)
     equal('beta opens on its last commit', beta.defaultMode, 'lastCommit')
-    equal('beta only offers the last commit', beta.availableModes, ['lastCommit'])
+    equal('beta only offers commit comparisons', beta.availableModes, ['lastCommit', 'commit'])
     equal('beta head subject', beta.head?.subject, 'Restyle the title')
     equal('branch reported', [alpha.branch, beta.branch], ['main', 'main'])
 

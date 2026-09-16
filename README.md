@@ -14,6 +14,10 @@ ws-reviewer                # in /Users/you/workplace/sessions
 - Repos with **staged or unstaged changes open on those changes** (`HEAD` vs the
   working tree, so staged and unstaged edits appear together). Repos with a
   clean tree **open on their most recent commit** instead.
+- Expanding a repo also lists its **commits**, marking the ones that are ahead
+  of its base branch. Review them **one at a time**, or take the whole stack
+  **as a single diff against the base** — the aggregate comes from the merge
+  base, so commits the base picked up after you branched stay out of it.
 - Expanding a repo lists its changed files as a collapsed tree; picking one
   loads the diff. Expanding a repo also opens its first changed file, so the
   right pane fills in immediately.
@@ -54,6 +58,8 @@ ws-reviewer [directory] [options]
 
   -p, --port <n>     Port to listen on (default 4300, tries the next free one)
   -d, --depth <n>    How deep to search for repos below the directory (default 1)
+  -b, --base <ref>   Base branch for the "Branch" comparison (default: the
+                     branch's upstream, else origin/HEAD, else main/master)
       --poll <ms>    Change-poll interval in ms (default 4000, or 1500 with --no-watch)
       --host <addr>  Interface to bind (default 127.0.0.1)
       --no-open      Do not open a browser
@@ -65,7 +71,7 @@ ws-reviewer [directory] [options]
 
 `--depth 2` picks up repos nested one directory further down. `--poll 10000`
 lowers idle cost on a large workspace; filesystem events still give immediate
-updates.
+updates. `--base origin/develop` overrides base detection for every repo.
 
 ### Keyboard
 
@@ -87,10 +93,31 @@ ones that apply are offered:
 | Working tree | `HEAD` vs the working tree — staged **and** unstaged, plus untracked files |
 | Staged | `HEAD` vs the index (`git diff --cached`) |
 | Unstaged | the index vs the working tree (`git diff`), plus untracked files |
+| Branch | the merge base vs `HEAD` — every commit on the branch as one diff |
 | Last commit | the parent of `HEAD` vs `HEAD` |
+| a commit | that commit vs its first parent, picked from the commit list |
 
 Untracked files are shown as all-addition diffs. A wholly untracked directory is
 expanded into its files (up to 200, then it stays collapsed as one row).
+
+### The base branch
+
+"Branch" needs to know what the work is a branch *of*. That is resolved once per
+repo, in this order:
+
+1. `--base <ref>`, if given
+2. the branch's upstream (`@{upstream}`)
+3. `origin/HEAD` — what the remote itself calls its default branch
+4. the first of `origin/main`, `origin/master`, `upstream/main`,
+   `upstream/master`, `main`, `master`, `develop` that exists
+
+The branch you are on is never its own base, so a repo sitting on `main` with no
+remote simply has no base, and the Branch comparison is not offered.
+
+The aggregate diff runs from the **merge base**, which is what `git diff
+base...HEAD` means. If the base gained commits after you branched, those are not
+yours and do not appear. Switching between commits keeps you on the same file
+whenever the new comparison also touches it.
 
 ## How it works
 
@@ -98,8 +125,12 @@ expanded into its files (up to 200, then it stays collapsed as one row).
   serves JSON over `node:http` with no runtime dependencies. One
   `git status --porcelain=v2 -b -z` per repo yields the file list, branch,
   upstream, divergence and `HEAD` sha together; git processes are the dominant
-  cost, so that call is shared between the change watcher and the API and the
-  head commit is cached by sha.
+  cost, so that call is shared between the change watcher and the API, and the
+  head commit, the resolved base and per-sha commit metadata are all cached so a
+  workspace refresh normally costs no git processes at all.
+- **Refs from the browser** are validated against a ref-name character set and
+  resolved through `rev-parse` before they reach any other git argument, so a
+  crafted `?ref=` cannot turn into a git option.
 - **Live updates**: recursive filesystem watches trigger an immediate re-check,
   a periodic poll backstops them, and changes reach the browser over
   server-sent events. The client refetches only what changed, and reloads
@@ -129,10 +160,12 @@ rendering.
 ```sh
 npm run dev          # API on 4300 + Vite with HMR on 4301
 npm run dev ../..    # point the dev API at a different workspace
-npm test             # 178 assertions: git parsing, row model, API, rendering
+npm test             # 241 assertions: git parsing, row model, API, rendering
 npm run typecheck
 ```
 
-`npm test` builds a throwaway workspace (staged, unstaged, untracked, renamed,
-deleted and binary files across two repos), runs the real API against it, and
-renders the real components with `react-dom/server`.
+`npm test` builds a throwaway workspace — staged, unstaged, untracked, renamed,
+deleted and binary files in one repo; a clean repo with history; and a third
+whose branch carries three commits over a base that has since moved on — then
+runs the real API against it and renders the real components with
+`react-dom/server`.

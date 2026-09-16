@@ -39,6 +39,14 @@ export async function run(): Promise<void> {
     store.set('ws-reviewer:view', JSON.stringify('split'))
     store.set('ws-reviewer:expanded', JSON.stringify(['alpha']))
     store.set('ws-reviewer:theme', JSON.stringify('light'))
+    // A remembered per-repo comparison, including one pinned to a commit.
+    store.set(
+      'ws-reviewer:comparisons',
+      JSON.stringify({
+        alpha: { mode: 'commit', ref: '0123456789abcdef0123456789abcdef01234567' },
+        beta: { mode: 'branch', base: 'origin/main' },
+      }),
+    )
     const restored = renderToStaticMarkup(<App />)
     check('renders with persisted state', restored.includes('class="topbar"'))
     check('persisted wrap/sort controls render', restored.includes('aria-pressed'))
