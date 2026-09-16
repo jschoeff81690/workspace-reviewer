@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import type { CompareMode, FileDiff } from '../../shared/types.ts'
+import type { Comparison, FileDiff, RepoChanges } from '../../shared/types.ts'
 import type { ThemeName } from '../lib/highlight.ts'
 import {
   buildRows,
@@ -21,7 +21,9 @@ const LIMIT_STEP = 5000
 
 interface Props {
   file: FileDiff | null
-  mode: CompareMode
+  comparison: Comparison
+  /** The comparison's file list, for its label and commit context. */
+  changes: RepoChanges | undefined
   loading: boolean
   error: string | null
   view: ViewMode
@@ -35,7 +37,8 @@ interface Props {
 }
 
 export function DiffPane(props: Props) {
-  const { file, mode, loading, error, view, wrap, theme, onView, onWrap, onNav } = props
+  const { file, comparison, changes, loading, error, view, wrap, theme, onView, onWrap, onNav } =
+    props
   const [expand, setExpand] = useState<ExpandState>({})
   const [limit, setLimit] = useState(INITIAL_LIMIT)
 
@@ -82,7 +85,7 @@ export function DiffPane(props: Props) {
                 <span className="plus">+{file.additions}</span>{' '}
                 <span className="minus">-{file.deletions}</span>
               </span>
-              <span className="pill">{MODE_LABELS[mode]}</span>
+              <ComparisonPill comparison={comparison} changes={changes} />
               <span className="pill">{language}</span>
               {file.contentNote && <span className="pill warn">{file.contentNote}</span>}
               {highlighting && <span className="pill">highlighting…</span>}
@@ -251,6 +254,46 @@ function FileContents({
       />
     </>
   )
+}
+
+/**
+ * Says which comparison the diff belongs to: the commit and its subject, how
+ * many commits a branch diff folds together, or the plain mode name.
+ */
+function ComparisonPill({
+  comparison,
+  changes,
+}: {
+  comparison: Comparison
+  changes: RepoChanges | undefined
+}) {
+  const label = MODE_LABELS[comparison.mode]
+
+  if (comparison.mode === 'branch') {
+    const count = changes?.commits.length ?? 0
+    return (
+      <span className="pill accent" title={changes?.label}>
+        {count > 0
+          ? `${count} ${count === 1 ? 'commit' : 'commits'} vs ${comparison.base ?? 'base'}`
+          : (changes?.label ?? label)}
+      </span>
+    )
+  }
+
+  if (comparison.mode === 'commit' || comparison.mode === 'lastCommit') {
+    const commit = changes?.commit
+    if (!commit) return <span className="pill">{label}</span>
+    return (
+      <span
+        className="pill accent"
+        title={`${commit.sha}\n${commit.author} \u00b7 ${new Date(commit.date).toLocaleString()}\n${commit.subject}`}
+      >
+        {`${commit.shortSha.slice(0, 8)} \u00b7 ${commit.subject}`}
+      </span>
+    )
+  }
+
+  return <span className="pill">{label}</span>
 }
 
 function PathLabel({ path, oldPath }: { path: string; oldPath?: string }) {

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { languageForPath } from '../shared/languages.ts'
 import { parseDiff, wholeFileHunk, type ParsedFileDiff } from '../shared/parse-diff.ts'
-import type { CompareMode, DiffHunk, FileDiff, FileStatus } from '../shared/types.ts'
+import type { BaseInfo, Comparison, DiffHunk, FileDiff, FileStatus } from '../shared/types.ts'
 import { git, gitBuffer } from './git.ts'
 import { resolveMode, type Side } from './modes.ts'
 import { countLines, isBinary } from './changes.ts'
@@ -17,17 +17,21 @@ const MAX_DIFF_LINES = 30_000
 export interface FileDiffRequest {
   repoName: string
   repoPath: string
-  mode: CompareMode
+  comparison: Comparison
+  /** Resolved base branch, for `branch` comparisons. */
+  base: BaseInfo | null
   filePath: string
   oldPath?: string
 }
 
 export async function getFileDiff(req: FileDiffRequest): Promise<FileDiff> {
-  const { repoName, repoPath, mode, filePath } = req
-  const spec = await resolveMode(repoPath, mode)
+  const { repoName, repoPath, filePath } = req
+  const spec = await resolveMode({ repoPath, comparison: req.comparison, base: req.base })
+  const mode = spec.comparison.mode
   // Only the working-tree and index modes need to know about untracked files
-  // and conflicts; a commit diff does not.
-  const status = spec.mode === 'lastCommit' ? null : await readStatus(repoPath)
+  // and conflicts; a commit or branch diff does not.
+  const needsStatus = mode === 'worktree' || mode === 'staged' || mode === 'unstaged'
+  const status = needsStatus ? await readStatus(repoPath) : null
   const entry = status?.byPath.get(filePath)
   const untracked =
     spec.includesUntracked &&
@@ -37,7 +41,7 @@ export async function getFileDiff(req: FileDiffRequest): Promise<FileDiff> {
   const language = languageForPath(filePath)
   const result: FileDiff = {
     repo: repoName,
-    mode: spec.mode,
+    comparison: spec.comparison,
     path: filePath,
     oldPath: req.oldPath,
     status: 'modified',

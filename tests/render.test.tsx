@@ -7,6 +7,8 @@ import { SplitDiff } from '../src/client/components/SplitDiff.tsx'
 import { buildRows, pairRows, splitLines } from '../src/client/lib/rows.ts'
 import { buildTree } from '../src/client/lib/tree.ts'
 import { listChanges } from '../src/server/changes.ts'
+import { listCommits } from '../src/server/log.ts'
+import { CommitList } from '../src/client/components/CommitList.tsx'
 import { getFileDiff } from '../src/server/filediff.ts'
 import { summarizeRepo } from '../src/server/workspace.ts'
 import { check, equal, suite } from './assert.ts'
@@ -20,7 +22,8 @@ export async function run(fixture: Fixture): Promise<void> {
   const file = await getFileDiff({
     repoName: 'alpha',
     repoPath: fixture.alpha,
-    mode: 'worktree',
+    comparison: { mode: 'worktree' },
+    base: null,
     filePath: 'src/server.ts',
   })
   const rows = buildRows({ hunks: file.hunks, expand: {}, newLines: splitLines(file.newContent) })
@@ -65,7 +68,8 @@ export async function run(fixture: Fixture): Promise<void> {
   const goDiff = await getFileDiff({
     repoName: 'alpha',
     repoPath: fixture.alpha,
-    mode: 'worktree',
+    comparison: { mode: 'worktree' },
+    base: null,
     filePath: 'main.go',
   })
   const goPaired = pairRows(
@@ -94,7 +98,8 @@ export async function run(fixture: Fixture): Promise<void> {
   const long = await getFileDiff({
     repoName: 'alpha',
     repoPath: fixture.alpha,
-    mode: 'worktree',
+    comparison: { mode: 'worktree' },
+    base: null,
     filePath: 'long.ts',
   })
   const longRows = buildRows({
@@ -122,7 +127,8 @@ export async function run(fixture: Fixture): Promise<void> {
     const markup = renderToStaticMarkup(
       <DiffPane
         file={file}
-        mode="worktree"
+        comparison={{ mode: 'worktree' }}
+        changes={undefined}
         loading={false}
         error={null}
         view={view}
@@ -143,7 +149,8 @@ export async function run(fixture: Fixture): Promise<void> {
   const filePane = renderToStaticMarkup(
     <DiffPane
       file={file}
-      mode="worktree"
+      comparison={{ mode: 'worktree' }}
+      changes={undefined}
       loading={false}
       error={null}
       view="file"
@@ -163,13 +170,15 @@ export async function run(fixture: Fixture): Promise<void> {
   const binary = await getFileDiff({
     repoName: 'alpha',
     repoPath: fixture.alpha,
-    mode: 'worktree',
+    comparison: { mode: 'worktree' },
+    base: null,
     filePath: 'blob.bin',
   })
   const binaryPane = renderToStaticMarkup(
     <DiffPane
       file={binary}
-      mode="worktree"
+      comparison={{ mode: 'worktree' }}
+      changes={undefined}
       loading={false}
       error={null}
       view="inline"
@@ -189,10 +198,12 @@ export async function run(fixture: Fixture): Promise<void> {
       file={await getFileDiff({
         repoName: 'alpha',
         repoPath: fixture.alpha,
-        mode: 'worktree',
+        comparison: { mode: 'worktree' },
+        base: null,
         filePath: 'README.md',
       })}
-      mode="worktree"
+      comparison={{ mode: 'worktree' }}
+      changes={undefined}
       loading={false}
       error={null}
       view="file"
@@ -208,7 +219,7 @@ export async function run(fixture: Fixture): Promise<void> {
   check('deleted file falls back to its old contents', deletedPane.includes('before deletion'))
 
   suite('rendering: sidebar')
-  const changes = await listChanges('alpha', fixture.alpha, 'worktree')
+  const changes = await listChanges('alpha', fixture.alpha, { mode: 'worktree' }, null)
   const tree = renderToStaticMarkup(
     <FileTreeView
       nodes={buildTree(changes.files)}
@@ -231,18 +242,22 @@ export async function run(fixture: Fixture): Promise<void> {
   const sidebar = renderToStaticMarkup(
     <Sidebar
       repos={[alphaSummary, betaSummary]}
-      changes={{ 'alpha|worktree': changes }}
+      changes={{ 'alpha|worktree||': changes }}
       changesError={{}}
       expanded={new Set(['alpha'])}
       collapsedDirs={new Set()}
       selection={{ repo: 'alpha', path: 'main.go' }}
       filter=""
-      modeFor={(repo) => repo.defaultMode}
+      comparisonFor={(repo) => ({ mode: repo.defaultMode })}
+      commits={{}}
+      commitsCollapsed={new Set()}
       onFilter={() => {}}
       onToggleRepo={() => {}}
-      onSetMode={() => {}}
+      onSetComparison={() => {}}
       onSelect={() => {}}
       onToggleDir={() => {}}
+      onToggleCommits={() => {}}
+      onShowMoreCommits={() => {}}
       filterRef={{ current: null }}
     />,
   )
@@ -253,4 +268,104 @@ export async function run(fixture: Fixture): Promise<void> {
   check('mode chips rendered for the expanded repo', sidebar.includes('class="mode-bar"'))
   equal('only the expanded repo contributes file rows', count(sidebar, 'status-badge'), changes.files.length)
   equal('only the expanded repo shows mode chips', count(sidebar, 'class="mode-bar"'), 1)
+
+  suite('rendering: commit list')
+  const gammaSummary = await summarizeRepo({ name: 'gamma', path: fixture.gamma })
+  const gammaCommits = await listCommits({
+    repoName: 'gamma',
+    repoPath: fixture.gamma,
+    base: gammaSummary.base,
+    limit: 10,
+  })
+  const [, c2] = fixture.gammaCommits.feature
+
+  const commitList = renderToStaticMarkup(
+    <CommitList
+      commits={gammaCommits.commits}
+      base={gammaSummary.base}
+      hasMore={gammaCommits.hasMore}
+      comparison={{ mode: 'commit', ref: c2 }}
+      headSha={gammaSummary.head?.sha ?? null}
+      collapsed={false}
+      loading={false}
+      onToggle={() => {}}
+      onSelectCommit={() => {}}
+      onSelectBranch={() => {}}
+      onShowMore={() => {}}
+    />,
+  )
+  check('commit rows rendered', count(commitList, 'class="commit-row') >= 5)
+  check('base and divergence summarized', commitList.includes('3 ahead of origin/main'))
+  check('behind count shown', commitList.includes('1 behind'))
+  check('aggregate row offered', commitList.includes('All 3 commits as one diff'))
+  check('branch commits marked apart from older ones', commitList.includes('commit-row ahead') && commitList.includes('commit-row behind-base'))
+  check('the chosen commit is highlighted', commitList.includes('selected'))
+  check('commit subjects shown', commitList.includes('C2: take a request and add a helper'))
+  check('per-commit stats shown', commitList.includes('class="plus"'))
+
+  const branchView = renderToStaticMarkup(
+    <CommitList
+      commits={gammaCommits.commits}
+      base={gammaSummary.base}
+      hasMore={false}
+      comparison={{ mode: 'branch', base: 'origin/main' }}
+      headSha={gammaSummary.head?.sha ?? null}
+      collapsed={false}
+      loading={false}
+      onToggle={() => {}}
+      onSelectCommit={() => {}}
+      onSelectBranch={() => {}}
+      onShowMore={() => {}}
+    />,
+  )
+  equal('branch mode marks exactly the folded-in commits', count(branchView, 'included'), 3)
+  check('aggregate row is the selected one', branchView.includes('commit-row branch selected'))
+
+  const collapsed = renderToStaticMarkup(
+    <CommitList
+      commits={gammaCommits.commits}
+      base={gammaSummary.base}
+      hasMore={false}
+      comparison={{ mode: 'lastCommit' }}
+      headSha={gammaSummary.head?.sha ?? null}
+      collapsed
+      loading={false}
+      onToggle={() => {}}
+      onSelectCommit={() => {}}
+      onSelectBranch={() => {}}
+      onShowMore={() => {}}
+    />,
+  )
+  equal('collapsed list renders no rows', count(collapsed, 'class="commit-row'), 0)
+  check('collapsed list keeps its header', collapsed.includes('3 ahead of origin/main'))
+
+  const branchChanges = await listChanges('gamma', fixture.gamma, { mode: 'branch' }, gammaSummary.base)
+  const branchSidebar = renderToStaticMarkup(
+    <Sidebar
+      repos={[gammaSummary]}
+      changes={{ 'gamma|branch|': branchChanges, 'gamma|branch||': branchChanges }}
+      changesError={{}}
+      expanded={new Set(['gamma'])}
+      collapsedDirs={new Set()}
+      selection={{ repo: 'gamma', path: 'helper.py' }}
+      filter=""
+      comparisonFor={() => ({ mode: 'branch' })}
+      commits={{ gamma: gammaCommits }}
+      commitsCollapsed={new Set()}
+      onFilter={() => {}}
+      onToggleRepo={() => {}}
+      onSetComparison={() => {}}
+      onSelect={() => {}}
+      onToggleDir={() => {}}
+      onToggleCommits={() => {}}
+      onShowMoreCommits={() => {}}
+      filterRef={{ current: null }}
+    />,
+  )
+  check('branch chip offered for a repo with commits ahead', branchSidebar.includes('Branch'))
+  check('ahead count shown on the chip', branchSidebar.includes('class="chip-count"'))
+  check('commit list rendered inside the repo', branchSidebar.includes('class="commits"'))
+  check('comparison label shown above the files', branchSidebar.includes('(3 commits)'))
+  check('branch files listed', branchSidebar.includes('helper.py') && branchSidebar.includes('service.py'))
+  check('base-only file absent from the branch view', !branchSidebar.includes('base-only.txt'))
 }

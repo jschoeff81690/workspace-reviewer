@@ -1,7 +1,21 @@
 import { useMemo } from 'react'
-import type { ChangedFile, CompareMode, RepoChanges, RepoSummary } from '../../shared/types.ts'
+import type {
+  ChangedFile,
+  Comparison,
+  RepoChanges,
+  RepoCommits,
+  RepoSummary,
+} from '../../shared/types.ts'
+import { comparisonKey } from '../../shared/types.ts'
 import { buildTree } from '../lib/tree.ts'
-import { MODE_HINTS, MODE_LABELS, type Selection } from '../lib/uiTypes.ts'
+import {
+  CHIP_MODES,
+  MODE_HINTS,
+  MODE_LABELS,
+  UNCOMMITTED_MODES,
+  type Selection,
+} from '../lib/uiTypes.ts'
+import { CommitList } from './CommitList.tsx'
 import { FileTreeView } from './FileTreeView.tsx'
 
 interface Props {
@@ -12,12 +26,16 @@ interface Props {
   collapsedDirs: Set<string>
   selection: Selection | null
   filter: string
-  modeFor: (repo: RepoSummary) => CompareMode
+  comparisonFor: (repo: RepoSummary) => Comparison
+  commits: Record<string, RepoCommits | undefined>
+  commitsCollapsed: Set<string>
   onFilter: (value: string) => void
   onToggleRepo: (name: string) => void
-  onSetMode: (repo: string, mode: CompareMode) => void
+  onSetComparison: (repo: string, comparison: Comparison) => void
   onSelect: (repo: string, file: ChangedFile) => void
   onToggleDir: (key: string) => void
+  onToggleCommits: (repo: string) => void
+  onShowMoreCommits: (repo: string) => void
   filterRef: React.RefObject<HTMLInputElement | null>
 }
 
@@ -29,10 +47,10 @@ export function Sidebar(props: Props) {
     if (!needle) return repos
     return repos.filter((repo) => {
       if (repo.name.toLowerCase().includes(needle)) return true
-      const changes = props.changes[`${repo.name}|${props.modeFor(repo)}`]
+      const changes = props.changes[comparisonKey(repo.name, props.comparisonFor(repo))]
       return !!changes?.files.some((file) => file.path.toLowerCase().includes(needle))
     })
-  }, [repos, needle, props.changes, props.modeFor])
+  }, [repos, needle, props.changes, props.comparisonFor])
 
   return (
     <aside className="sidebar">
@@ -49,8 +67,8 @@ export function Sidebar(props: Props) {
 
       <div className="repo-list">
         {visibleRepos.map((repo) => {
-          const mode = props.modeFor(repo)
-          const key = `${repo.name}|${mode}`
+          const comparison = props.comparisonFor(repo)
+          const key = comparisonKey(repo.name, comparison)
           const isOpen = expanded.has(repo.name)
           const changes = props.changes[key]
           const error = props.changesError[key]
@@ -87,18 +105,47 @@ export function Sidebar(props: Props) {
               {isOpen && (
                 <>
                   <div className="mode-bar">
-                    {repo.availableModes.map((candidate) => (
-                      <button
-                        key={candidate}
-                        className="chip"
-                        aria-pressed={mode === candidate}
-                        title={`Compare ${MODE_HINTS[candidate]}`}
-                        onClick={() => props.onSetMode(repo.name, candidate)}
-                      >
-                        {MODE_LABELS[candidate]}
-                      </button>
-                    ))}
+                    {CHIP_MODES.filter((candidate) => repo.availableModes.includes(candidate)).map(
+                      (candidate, index, shown) => (
+                        <ModeChip
+                          key={candidate}
+                          mode={candidate}
+                          active={comparison.mode === candidate}
+                          count={candidate === 'branch' ? repo.base?.ahead : undefined}
+                          // Separate the uncommitted comparisons from the committed ones.
+                          divider={
+                            index > 0 &&
+                            UNCOMMITTED_MODES.includes(shown[index - 1]) &&
+                            !UNCOMMITTED_MODES.includes(candidate)
+                          }
+                          onClick={() =>
+                            props.onSetComparison(
+                              repo.name,
+                              candidate === 'branch' ? { mode: 'branch' } : { mode: candidate },
+                            )
+                          }
+                        />
+                      ),
+                    )}
                   </div>
+
+                  {repo.head && (
+                    <CommitList
+                      commits={props.commits[repo.name]?.commits}
+                      base={repo.base}
+                      hasMore={props.commits[repo.name]?.hasMore ?? false}
+                      comparison={comparison}
+                      headSha={repo.head.sha}
+                      collapsed={props.commitsCollapsed.has(repo.name)}
+                      loading={!props.commits[repo.name]}
+                      onToggle={() => props.onToggleCommits(repo.name)}
+                      onSelectCommit={(sha) =>
+                        props.onSetComparison(repo.name, { mode: 'commit', ref: sha })
+                      }
+                      onSelectBranch={() => props.onSetComparison(repo.name, { mode: 'branch' })}
+                      onShowMore={() => props.onShowMoreCommits(repo.name)}
+                    />
+                  )}
 
                   {error && <div className="empty-note">{error}</div>}
 
@@ -112,11 +159,12 @@ export function Sidebar(props: Props) {
 
                   {!error && changes && files.length > 0 && (
                     <>
-                      {mode === 'lastCommit' && changes.commit && (
-                        <div className="empty-note" title={changes.commit.date}>
-                          {`${changes.commit.shortSha} · ${changes.commit.subject}`}
-                        </div>
-                      )}
+                      <div className="files-head" title={changes.commit?.date}>
+                        <span className="files-label">{changes.label}</span>
+                        <span className="files-count">
+                          {files.length} {files.length === 1 ? 'file' : 'files'}
+                        </span>
+                      </div>
                       <FileTreeView
                         nodes={buildTree(files)}
                         repo={repo.name}
@@ -142,6 +190,35 @@ export function Sidebar(props: Props) {
         {visibleRepos.length === 0 && <div className="empty-note">no repos match the filter</div>}
       </div>
     </aside>
+  )
+}
+
+function ModeChip({
+  mode,
+  active,
+  count,
+  divider,
+  onClick,
+}: {
+  mode: Comparison['mode']
+  active: boolean
+  count?: number
+  divider: boolean
+  onClick: () => void
+}) {
+  return (
+    <>
+      {divider && <span className="chip-divider" />}
+      <button
+        className="chip"
+        aria-pressed={active}
+        title={`Compare ${MODE_HINTS[mode]}`}
+        onClick={onClick}
+      >
+        {MODE_LABELS[mode]}
+        {count !== undefined && count > 0 && <span className="chip-count">{count}</span>}
+      </button>
+    </>
   )
 }
 

@@ -834,3 +834,186 @@ table.diff.split col.num-col {
 table.diff.split col.code-col {
   width: calc(50% - var(--num-w));
 }
+
+/* ------------------------------------------------------------- commit list */
+.chip-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 3px;
+}
+
+.chip-count {
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
+.commits {
+  border-top: 1px solid var(--border-soft);
+  margin: 2px 0 0;
+  padding-bottom: 2px;
+}
+
+.commits-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px 4px 10px;
+  text-align: left;
+}
+
+.commits-head:hover {
+  background: var(--bg-hover);
+}
+
+.commits-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.commits-sub {
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-row {
+  display: grid;
+  grid-template-columns: 12px auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 8px 2px 14px;
+  text-align: left;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.commit-row:hover {
+  background: var(--bg-hover);
+}
+
+.commit-row.selected {
+  background: var(--bg-active);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Every commit folded into the branch diff, so the grouping is visible. */
+.commit-row.included {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.commit-row.branch {
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  font-weight: 600;
+  color: var(--fg);
+  border-bottom: 1px dashed var(--border-soft);
+  padding-bottom: 3px;
+  margin-bottom: 2px;
+}
+
+.commit-mark {
+  color: var(--add-fg);
+  font-size: 9px;
+  text-align: center;
+}
+
+.commit-row.behind-base .commit-mark {
+  color: var(--fg-subtle);
+}
+
+.commit-sha {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--accent);
+}
+
+.commit-row.behind-base .commit-sha {
+  color: var(--fg-subtle);
+}
+
+.commit-subject {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.commit-row.behind-base .commit-subject {
+  color: var(--fg-muted);
+}
+
+.commit-subject .pill {
+  font-size: 9px;
+  padding: 0 4px;
+  flex: none;
+}
+
+.commit-when {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-subtle);
+  min-width: 3ch;
+  text-align: right;
+}
+
+.commits-more {
+  display: block;
+  width: 100%;
+  padding: 3px 8px 3px 32px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.commits-more:hover {
+  background: var(--bg-hover);
+  text-decoration: underline;
+}
+
+.files-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px 3px 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.files-label {
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-count {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+
+.pill.accent {
+  border-color: var(--accent);
+  color: var(--accent);
+  max-width: 44ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
